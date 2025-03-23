@@ -93,7 +93,7 @@ def read_ultrasonic():
         return 20.0
 
 def detect_object_position_from_camera():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)  # Try camera index 1 for Dobot camera
     if not cap.isOpened():
         print("Failed to open camera")
         return x_initial, y_initial, z_initial
@@ -123,22 +123,43 @@ def execute_pick_and_place():
     x_final, y_final = 150, 100
     detect_object_position_from_camera()
     print("Queuing movement commands...")
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial + 30, 0, isQueued=1)
-    time.sleep(0.25)
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial, 0, isQueued=1)
-    time.sleep(0.25)
-    dType.SetEndEffectorGripper(api, enableCtrl=1, on=1, isQueued=1)
-    time.sleep(0.25)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial + 30, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
+    index = dType.SetEndEffectorGripper(api, enableCtrl=1, on=1, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
     time.sleep(2)
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial + 30, 0, isQueued=1)
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final + 30, 0, isQueued=1)
-    time.sleep(0.25)
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final, 0, isQueued=1)
-    time.sleep(0.25)
-    dType.SetEndEffectorGripper(api, enableCtrl=1, on=0, isQueued=1)
-    time.sleep(0.25)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_initial, y_initial, z_initial + 30, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final + 30, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
+    index = dType.SetEndEffectorGripper(api, enableCtrl=1, on=0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
     time.sleep(2)
-    dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final + 30, 0, isQueued=1)
+
+    index = dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_final, y_final, z_final + 30, 0, isQueued=1)[1]
+    while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+        time.sleep(0.01)
+
     print("Commands sent. Pick-and-place should be executing now.")
     dType.SetEndEffectorGripper(api, enableCtrl=0, on=0, isQueued=1)  # Set gripper to rest
     
@@ -148,11 +169,98 @@ def start_gui():
     def on_run():
         threading.Thread(target=execute_pick_and_place).start()
 
+    def show_camera():
+        def update():
+            cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+            if not cap.isOpened():
+                print("Failed to open camera")
+                return
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                lower_red = (0, 120, 70)
+                upper_red = (10, 255, 255)
+                mask = cv2.inRange(hsv, lower_red, upper_red)
+                moments = cv2.moments(mask)
+                if moments['m00'] > 0:
+                    cx = int(moments['m10'] / moments['m00'])
+                    cy = int(moments['m01'] / moments['m00'])
+                    cv2.circle(frame, (cx, cy), 10, (0, 255, 0), 2)
+                    cv2.putText(frame, f"({cx}, {cy})", (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                cv2.imshow("Dobot Camera Feed", frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+
+            cap.release()
+            cv2.destroyAllWindows()
+
+        threading.Thread(target=update).start()
+
     root = tk.Tk()
     root.title("Dobot Manual Control")
     tk.Button(root, text="KILL Program", command=lambda: (dType.SetEndEffectorGripper(api, enableCtrl=0, on=0, isQueued=0), dType.SetQueuedCmdStopExec(api), dType.SetHOMECmd(api, temp=1, isQueued=0), dType.DisconnectDobot(api), root.quit(), exit()), bg='red', fg='white', height=2, width=25).pack(pady=10)
     tk.Button(root, text="Run Pick and Place", command=on_run, height=2, width=25).pack(padx=20, pady=20)
+    tk.Button(root, text="Show Camera Feed", command=show_camera, height=2, width=25).pack(pady=10)
     tk.Button(root, text="Exit", command=lambda: (root.destroy(), dType.DisconnectDobot(api))).pack(pady=10)
+
+    def track_and_grab():
+        def wait_for_cmd(result):
+            print(f"Command result: {result}")
+            if result and len(result) > 1:
+                idx = result[1]
+                while dType.GetQueuedCmdCurrentIndex(api)[0] < idx:
+                    time.sleep(0.01)
+            else:
+                print("Failed to queue command.")
+
+        def worker():
+            cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                print("Failed to capture image")
+                return
+
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            lower_red = (0, 120, 70)
+            upper_red = (10, 255, 255)
+            mask = cv2.inRange(hsv, lower_red, upper_red)
+            moments = cv2.moments(mask)
+            if moments['m00'] > 0:
+                cx = int(moments['m10'] / moments['m00'])
+                cy = int(moments['m01'] / moments['m00'])
+                print(f"Tracking object at pixel: ({cx}, {cy})")
+
+                x_offset_mm = 2.5 * 25.4
+                px_to_mm = 0.5
+                x_robot = x_initial + (cx - 320) * px_to_mm + x_offset_mm
+                y_robot = y_initial + (cy - 240) * px_to_mm
+                z_robot = read_ultrasonic()
+                print(f"Moving to: ({x_robot}, {y_robot}, {z_robot})")
+
+                wait_for_cmd(dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_robot, y_robot, z_robot + 30, 0, isQueued=1))
+                wait_for_cmd(dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_robot, y_robot, z_robot, 0, isQueued=1))
+                wait_for_cmd(dType.SetEndEffectorGripper(api, enableCtrl=1, on=1, isQueued=1))
+                time.sleep(1)
+                wait_for_cmd(dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_robot, y_robot, z_robot + 30, 0, isQueued=1))
+                dType.SetEndEffectorGripper(api, enableCtrl=0, on=0, isQueued=1)
+            else:
+                print("No object detected")
+
+        threading.Thread(target=worker).start()
+
+    tk.Button(root, text="Track and Grab", command=track_and_grab, height=2, width=25).pack(pady=10)
     root.mainloop()
 
 print("Starting GUI...")
