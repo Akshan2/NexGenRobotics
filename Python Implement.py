@@ -23,6 +23,11 @@ dType.SetHOMEParams(api, 200, 0, 50, 0)
 homeCmdIndex = dType.SetHOMECmd(api, temp=1, isQueued=1)[1]
 dType.SetQueuedCmdStartExec(api)
 
+# Move to home position after homing
+index = dType.SetHOMECmd(api, temp=1, isQueued=1)[1]
+while dType.GetQueuedCmdCurrentIndex(api)[0] < index:
+    time.sleep(0.1)
+
 # Wait for HOMECmd to complete
 print("Homing started...")
 while True:
@@ -53,7 +58,7 @@ print("Jump params set.")
 print("All home done")
 
 # === Define Point A ===
-x_initial, y_initial, z_initial = 200, 0, 0  # Pick position (Z = 0)
+x_initial, y_initial, z_initial = 200, 0, 50  # Pick position (Z = 0)
 
 # === Read Ultrasonic Sensor via EIO15 (TRIG) and EIO16 (ECHO) ===
 TRIG_PORT = 15  # EIO15
@@ -76,7 +81,7 @@ def read_ultrasonic():
                 break
         else:
             print("Ultrasonic ECHO timeout on HIGH")
-            return 20.0
+            return 7.94  # Default to 3 1/8 inches in cm if ultrasonic fails
         timeout = time.time() + 0.05
         while time.time() < timeout:
             if dType.GetDI(api, ECHO_PORT)[0] == 0:
@@ -102,14 +107,16 @@ def detect_object_position_from_camera():
     if not ret:
         print("Failed to read from camera")
         return x_initial, y_initial, z_initial
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    lower_red = (0, 120, 70)
-    upper_red = (10, 255, 255)
-    mask = cv2.inRange(hsv, lower_red, upper_red)
-    moments = cv2.moments(mask)
-    if moments['m00'] > 0:
-        cx = int(moments['m10'] / moments['m00'])
-        cy = int(moments['m01'] / moments['m00'])
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 60, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        if M['m00'] > 0:
+          cx = int(M['m10'] / M['m00'])
+          cy = int(M['m01'] / M['m00'])
         print(f"Object detected at pixel: ({cx}, {cy})")
     else:
         print("No object detected")
@@ -119,7 +126,7 @@ def execute_pick_and_place():
     print("Starting pick-and-place sequence")
     ultrasonic_z = read_ultrasonic()
     print(f"Ultrasonic Z height: {ultrasonic_z} cm")
-    z_final = ultrasonic_z
+    z_final = -25  # Floor where items will be picked
     x_final, y_final = 150, 100
     detect_object_position_from_camera()
     print("Queuing movement commands...")
@@ -188,12 +195,26 @@ def start_gui():
                 lower_red = (0, 120, 70)
                 upper_red = (10, 255, 255)
                 mask = cv2.inRange(hsv, lower_red, upper_red)
-                moments = cv2.moments(mask)
-                if moments['m00'] > 0:
-                    cx = int(moments['m10'] / moments['m00'])
-                    cy = int(moments['m01'] / moments['m00'])
-                    cv2.circle(frame, (cx, cy), 10, (0, 255, 0), 2)
-                    cv2.putText(frame, f"({cx}, {cy})", (cx + 10, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                M = cv2.moments(mask)
+                if M['m00'] > 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    if contours:
+                        c = max(contours, key=cv2.contourArea)
+                        x, y, w, h = cv2.boundingRect(c)
+                        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                # Draw origin and quadrant lines
+                cv2.line(frame, (320, 0), (320, 480), (255, 0, 0), 1)  # vertical center line
+                cv2.line(frame, (0, 240), (640, 240), (255, 0, 0), 1)  # horizontal center line
+                cv2.circle(frame, (320, 240), 5, (255, 0, 255), -1)     # center point
+
+                # Quadrant labels
+                cv2.putText(frame, "I", (500, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(frame, "II", (100, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(frame, "III", (100, 400), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(frame, "IV", (500, 400), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
 
                 cv2.imshow("Dobot Camera Feed", frame)
                 key = cv2.waitKey(1) & 0xFF
@@ -204,6 +225,7 @@ def start_gui():
             cv2.destroyAllWindows()
 
         threading.Thread(target=update).start()
+
 
     root = tk.Tk()
     root.title("Dobot Manual Control")
@@ -226,6 +248,9 @@ def start_gui():
             cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            time.sleep(0.5)  # Allow camera auto-exposure to settle
+            for _ in range(5):  # Discard first few unstable frames
+                cap.read()
             ret, frame = cap.read()
             cap.release()
             if not ret:
@@ -236,17 +261,39 @@ def start_gui():
             lower_red = (0, 120, 70)
             upper_red = (10, 255, 255)
             mask = cv2.inRange(hsv, lower_red, upper_red)
-            moments = cv2.moments(mask)
-            if moments['m00'] > 0:
-                cx = int(moments['m10'] / moments['m00'])
-                cy = int(moments['m01'] / moments['m00'])
+            M = cv2.moments(mask)
+            if M['m00'] > 0:
+                cx = int(M['m10'] / M['m00'])
+                cy = int(M['m01'] / M['m00'])
                 print(f"Tracking object at pixel: ({cx}, {cy})")
 
-                x_offset_mm = 2.5 * 25.4
-                px_to_mm = 0.5
-                x_robot = x_initial + (cx - 320) * px_to_mm + x_offset_mm
-                y_robot = y_initial + (cy - 240) * px_to_mm
-                z_robot = read_ultrasonic()
+                # Removed pixel-to-mm multipliers
+                frame_height = 480
+                frame_center_x, frame_center_y = 320, 240  # Origin at center
+
+                dx_px = cx - frame_center_x
+                dy_px = frame_center_y - cy
+
+                # Direct offset without multiplier
+                dx_px = cx - 320  # Relative to center of 640px frame
+                dy_px = 240 - cy  # Relative to center of 480px frame
+
+                if cx >= 320 and cy <= 240:  # Quadrant I
+                    dx_mm = abs(dx_px) * 0.25
+                    dy_mm = abs(dy_px) * 0.25
+                elif cx < 320 and cy <= 240:  # Quadrant II
+                    dx_mm = -abs(dx_px) * 0.25
+                    dy_mm = abs(dy_px) * 0.25
+                elif cx < 320 and cy > 240:  # Quadrant III
+                    dx_mm = -abs(dx_px) * 0.25
+                    dy_mm = -abs(dy_px) * 0.25
+                else:  # Quadrant IV
+                    dx_mm = abs(dx_px) * 0.25
+                    dy_mm = -abs(dy_px) * 0.25
+
+                x_robot = x_initial + dx_mm
+                y_robot = y_initial + dy_mm
+                z_robot = -25  # Floor level for grabbing
                 print(f"Moving to: ({x_robot}, {y_robot}, {z_robot})")
 
                 wait_for_cmd(dType.SetPTPCmd(api, dType.PTPMode.PTPMOVLXYZMode, x_robot, y_robot, z_robot + 30, 0, isQueued=1))
